@@ -28,9 +28,39 @@ You'll need Python 3.14 and either [Node.js](https://nodejs.org/) or [Deno](http
 
 ### 1. Set up the bot in Discord
 
-1. Create an application and a bot user in the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Under **Bot**, turn on the **Message Content Intent**.
-3. Invite the bot to your server with the `bot` and `applications.commands` scopes, and the **Connect** and **Speak** voice permissions.
+#### Create the bot
+
+1. In the [Discord Developer Portal](https://discord.com/developers/applications), click **New Application** and give it a name.
+2. Go to **Bot**. Under **Privileged Gateway Intents**, turn on **Message Content Intent** and save. The bot won't connect without it.
+
+#### Get the token
+
+1. On the **Bot** page, under **Token**, click **Reset Token** and confirm (with your two-factor code if you have it on).
+2. Copy the token straight away, because Discord only shows it once. It goes in `.env` as `DISCORD_TOKEN` (step 3).
+
+Treat the token like a password. If it ever leaks, reset it here; the old one stops working immediately.
+
+#### Install it on your server
+
+1. Go to **OAuth2 → URL Generator**.
+2. Under **Scopes**, tick `bot` and `applications.commands`.
+3. Under **Bot Permissions**, tick:
+
+   | Permission | Needed for |
+   | --- | --- |
+   | View Channels | Seeing the channel a command is used in |
+   | Send Messages | Replying to commands |
+   | Attach Files | Posting the `/gawk` image |
+   | Read Message History | Finding the latest image for `/gawk` |
+   | Connect | Joining voice for `/play` |
+   | Speak | Playing audio |
+
+4. Copy the **Generated URL** at the bottom, open it in your browser, choose your server and click **Authorize**. You need the **Manage Server** permission on that server.
+
+#### Get your server ID
+
+1. In Discord, go to **User Settings → Advanced** and turn on **Developer Mode**.
+2. Right-click your server's icon and choose **Copy Server ID**. It goes in `.env` as `GUILD_ID` (step 3).
 
 ### 2. Install
 
@@ -41,6 +71,7 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
 ### 3. Configure
 
 Create a `.env` file in the `DiscordBot` folder. It's already in `.gitignore`, so it won't be committed.
@@ -65,7 +96,13 @@ FORCE_SYNC=0
 python MyBot.py
 ```
 
-You should see `<bot name> is online!` in the console.
+You should see `Server commands synced: gawk` and then `<bot name> is online!` in the console. Leave it running while you use the bot, and press **Ctrl+C** to stop it.
+
+If the commands don't appear in Discord:
+
+- Press **Ctrl+R** in Discord to refresh. `/play` and `/stop` are global commands, so they can take a while to show up the first time.
+- Check that `GUILD_ID` matches the server you're looking at.
+- Check that the invite link included the `applications.commands` scope. If not, generate a new link and authorize it again; you don't need to remove the bot first.
 
 ## Notes
 
