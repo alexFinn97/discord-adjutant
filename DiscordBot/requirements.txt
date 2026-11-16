@@ -1,0 +1,8 @@
+discord.py[voice]==2.7.1
+python-dotenv==1.2.2
+# yt-dlp needs regular updates to keep working with YouTube
+yt-dlp>=2026.3.3
+opencv-contrib-python==4.13.0.92
+numpy==2.4.3
+mediapipe==0.10.32
+requests==2.32.5

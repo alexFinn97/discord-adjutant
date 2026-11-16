@@ -16,6 +16,9 @@ dist/
 # dotenv environment variable files
 .env
 
+# Downloaded MediaPipe models (fetched on first use)
+models/
+
 # Virtual environments
 .venv
 env/
