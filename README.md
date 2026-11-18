@@ -14,11 +14,11 @@ A Discord bot running on a private server with my friends, written in Python wit
 
 - **Slash commands** use discord.py's `app_commands` and are synced with Discord when the bot starts.
 - **Music:** [yt-dlp](https://github.com/yt-dlp/yt-dlp) searches YouTube and resolves the audio stream URL. The search runs in a thread-pool executor so it doesn't block the bot's event loop. FFmpeg then streams the audio into the voice channel.
-- **Gawk:** the image is downloaded and decoded with OpenCV. The [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker) finds the face landmarks, then a funhouse-mirror "bulge" warp (built with OpenCV's `remap`) magnifies the eyes and mouth, sized to the width of the face. The image work runs in a background thread so the bot stays responsive, and the result is sent from memory without writing a file.
+- **Gawk:** the image is downloaded and decoded with OpenCV, and anything larger than 2048 pixels on its longest side is scaled down to that size to keep memory use low. The [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker) finds the face landmarks, then a funhouse-mirror "bulge" warp (built with OpenCV's `remap`) magnifies the eyes and mouth, sized to the width of the face. The image work runs in a background thread so the bot stays responsive, and the result is sent from memory without writing a file.
 
 ## Tech
 
-Python 3.14 · discord.py 2.7 · yt-dlp · FFmpeg · OpenCV · MediaPipe 0.10 · NumPy · python-dotenv
+Python 3.14 · discord.py 2.7 · yt-dlp · FFmpeg · OpenCV · MediaPipe 1.2 · NumPy · python-dotenv · Docker
 
 ## Running it locally
 
@@ -103,6 +103,57 @@ If the commands don't appear in Discord:
 - Press **Ctrl+R** in Discord to refresh. `/play` and `/stop` are global commands, so they can take a while to show up the first time.
 - Check that `GUILD_ID` matches the server you're looking at.
 - Check that the invite link included the `applications.commands` scope. If not, generate a new link and authorize it again; you don't need to remove the bot first.
+
+## Deploying to a Linux VM
+
+The bot runs as a Docker container on any Linux VM, x86_64 or ARM64. For a comparison of free hosts (Azure, Oracle Cloud, home hosting) and why GitHub itself can't host it, see [docs/hosting-options.md](docs/hosting-options.md).
+
+### How it works
+
+On every push to `master` that touches the bot, [.github/workflows/deploy.yml](.github/workflows/deploy.yml):
+
+1. Builds the image from the [Dockerfile](Dockerfile) for `linux/amd64` and `linux/arm64`.
+2. Pushes it to GitHub Container Registry as `ghcr.io/alexfinn97/discord-adjutant`, tagged `latest` and with the commit SHA.
+3. If the `DEPLOY_HOST` secret is set, copies [deploy/compose.yaml](deploy/compose.yaml) to `~/discord-adjutant` on the VM over SSH, pulls the new image and restarts the bot.
+
+You can also run it by hand from the **Actions** tab (**Build and deploy → Run workflow**).
+
+### One-time VM setup
+
+1. Install Docker Engine and the Compose plugin ([instructions](https://docs.docker.com/engine/install/)), then let your user run it: `sudo usermod -aG docker $USER` and log in again.
+2. On a VM with 1 GB of RAM, add swap so `/gawk` has room:
+
+   ```bash
+   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   ```
+
+3. Create `~/discord-adjutant/.env` with the same values as the local `.env` (`DISCORD_TOKEN`, `GUILD_ID`, `FORCE_SYNC`). The token lives only on the VM, not in GitHub or the image.
+4. If the GHCR package is private, log the VM in once with a [personal access token](https://github.com/settings/tokens) that has only `read:packages`: `docker login ghcr.io -u <github-username>`. If you make the package public (**Packages → discord-adjutant → Package settings**), skip this.
+5. Create an SSH key pair for deploys and add the public key to `~/.ssh/authorized_keys` on the VM.
+
+### Repository secrets
+
+In **Settings → Secrets and variables → Actions**, add:
+
+| Secret | Value |
+| --- | --- |
+| `DEPLOY_HOST` | The VM's IP address or hostname |
+| `DEPLOY_USER` | The SSH user from step 1 |
+| `DEPLOY_SSH_KEY` | The private key from step 5 |
+
+Until `DEPLOY_HOST` is set, the workflow only builds and pushes the image.
+
+### Checking on it
+
+```bash
+cd ~/discord-adjutant
+docker compose ps
+docker compose logs -f
+```
+
+Only run one copy of the bot per token. Stop the local one before the VM's starts.
 
 ## Notes
 
