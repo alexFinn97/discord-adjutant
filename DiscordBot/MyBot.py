@@ -38,6 +38,10 @@ FACE_MODEL_PATH = os.getenv("FACE_MODEL_PATH") or os.path.join(BASE_DIR, "models
 _face_landmarker = None;
 _face_landmarker_lock = threading.Lock();
 
+# /gawk shrinks bigger images to this many pixels on their longest side before warping.
+# The warp builds several full-size arrays, so a 12 MP phone photo would otherwise peak at ~700 MB.
+GAWK_MAX_SIDE = 2048;
+
 async def search_ytdlp_async(query, ydl_opts):
     loop = asyncio.get_running_loop();
     return await loop.run_in_executor(None, lambda: _extract(query, ydl_opts));
@@ -93,6 +97,13 @@ def _warp_face(image_data):
 
     if img is None:
         raise ValueError("Image could not be decoded.");
+
+    height, width = img.shape[:2];
+    longest_side = max(height, width);
+    if longest_side > GAWK_MAX_SIDE:
+        scale = GAWK_MAX_SIDE / longest_side;
+        new_size = (max(1, round(width * scale)), max(1, round(height * scale)));
+        img = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA);
 
     rgb_image = np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB));
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image);
