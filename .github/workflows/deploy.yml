@@ -1,0 +1,109 @@
+# Builds the bot's Docker image for x86_64 and ARM64, pushes it to GitHub Container Registry,
+# then (on master, once a VM is set up) pulls it on the VM over SSH and restarts the bot.
+#
+# Repository secrets used by the deploy job (it's skipped until DEPLOY_HOST is set):
+#   DEPLOY_HOST     VM address
+#   DEPLOY_USER     SSH user on the VM (must be able to run docker)
+#   DEPLOY_SSH_KEY  private key for that user
+name: Build and deploy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "DiscordBot/**"
+      - "Dockerfile"
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      deploy: ${{ steps.deploy-check.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # metadata-action lowercases this, which GHCR requires.
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: DiscordBot
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Secrets can't be used in a job's "if", so work out here whether to deploy.
+      - name: Check whether to deploy
+        id: deploy-check
+        env:
+          HAS_HOST: ${{ secrets.DEPLOY_HOST != '' }}
+          IS_MASTER: ${{ github.ref == 'refs/heads/master' }}
+        run: |
+          if [ "$HAS_HOST" = "true" ] && [ "$IS_MASTER" = "true" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping deploy: DEPLOY_HOST isn't set or this isn't master."
+          fi
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Copy compose file to the VM
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: deploy/compose.yaml
+          target: discord-adjutant
+          strip_components: 1
+
+      - name: Pull the new image and restart the bot
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/discord-adjutant
+            docker compose pull
+            docker compose up -d
+            docker image prune -f

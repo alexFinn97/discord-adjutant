@@ -1,0 +1,17 @@
+# Runs the bot on a Linux VM. Lives in ~/discord-adjutant on the VM, next to the .env file.
+# The deploy workflow copies this file there and runs: docker compose pull && docker compose up -d
+services:
+  bot:
+    image: ghcr.io/alexfinn97/discord-adjutant:latest
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - bot-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
