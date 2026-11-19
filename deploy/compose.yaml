@@ -5,6 +5,10 @@ services:
     image: ghcr.io/alexfinn97/discord-adjutant:latest
     env_file: .env
     restart: unless-stopped
+    # Caps so the bot can't crowd out other services on a shared machine.
+    # It peaks at about 320 MB today; raise these if heavier features need it.
+    mem_limit: 1g
+    cpus: "1.0"
     volumes:
       - bot-data:/data
     logging:
