@@ -106,7 +106,7 @@ If the commands don't appear in Discord:
 
 ## Deploying to a Linux VM
 
-The bot runs as a Docker container on any Linux VM, x86_64 or ARM64. For a comparison of free hosts (Azure, Oracle Cloud, home hosting) and why GitHub itself can't host it, see [docs/hosting-options.md](docs/hosting-options.md).
+The bot runs as a Docker container on any Linux VM, x86_64 or ARM64. For a comparison of free hosts (Azure, Oracle Cloud, home hosting) and why GitHub itself can't host it, see [docs/hosting-options.md](docs/hosting-options.md). To run it on a friend's home server, and later move it to a Raspberry Pi, see [docs/home-server-hosting.md](docs/home-server-hosting.md).
 
 ### How it works
 
@@ -142,8 +142,10 @@ In **Settings → Secrets and variables → Actions**, add:
 | `DEPLOY_HOST` | The VM's IP address or hostname |
 | `DEPLOY_USER` | The SSH user from step 1 |
 | `DEPLOY_SSH_KEY` | The private key from step 5 |
+| `TS_OAUTH_CLIENT_ID` | Optional. A Tailscale OAuth client ID, for a host with no public address (e.g. on a home network). |
+| `TS_OAUTH_SECRET` | Optional. That client's secret. |
 
-Until `DEPLOY_HOST` is set, the workflow only builds and pushes the image.
+Until `DEPLOY_HOST` is set, the workflow only builds and pushes the image. With the two Tailscale secrets set, the deploy job joins your tailnet first, and `DEPLOY_HOST` is the host's Tailscale IP. For the full setup on someone else's home server, see [docs/home-server-hosting.md](docs/home-server-hosting.md).
 
 ### Checking on it
 

@@ -2,9 +2,13 @@
 # then (on master, once a VM is set up) pulls it on the VM over SSH and restarts the bot.
 #
 # Repository secrets used by the deploy job (it's skipped until DEPLOY_HOST is set):
-#   DEPLOY_HOST     VM address
-#   DEPLOY_USER     SSH user on the VM (must be able to run docker)
-#   DEPLOY_SSH_KEY  private key for that user
+#   DEPLOY_HOST         host address; its Tailscale IP (100.x.y.z) when the TS_ secrets are set
+#   DEPLOY_USER         SSH user on the host (must be able to run docker)
+#   DEPLOY_SSH_KEY      private key for that user
+# Optional, for a host on a home network (see docs/home-server-hosting.md):
+#   TS_OAUTH_CLIENT_ID  Tailscale OAuth client allowed to create tag:ci auth keys
+#   TS_OAUTH_SECRET     its secret
+# With them set, the deploy job joins the tailnet as a short-lived tag:ci node before connecting.
 name: Build and deploy
 
 on:
@@ -82,8 +86,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # Exposed as env so the step below can check whether it's set.
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v7
+
+      # Lets the runner reach a host with no public address. The node is ephemeral,
+      # so it disappears from the tailnet after the job.
+      - name: Join tailnet
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
 
       - name: Copy compose file to the VM
         uses: appleboy/scp-action@v1.0.0

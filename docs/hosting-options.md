@@ -181,7 +181,8 @@ Other costs:
 - **Software:** install Docker, then use the same `deploy/compose.yaml` and `.env` as on a VM (see the README).
 - **No static IP or port forwarding needed.** The bot only makes outbound connections: to Discord's gateway, to voice servers and to YouTube.
 - **To SSH in from your PC,** use the machine's hostname (e.g. `ssh pi@raspberrypi.local`). A DHCP reservation on the router is optional.
-- **Deploys:** the GitHub deploy job can only SSH in if the machine is reachable from the internet, for example over [Tailscale](https://tailscale.com/). Otherwise run `docker compose pull && docker compose up -d` on the machine after each push.
+- **Deploys:** the GitHub deploy job can join your [Tailscale](https://tailscale.com/) tailnet and SSH in without any ports being opened. Without that, run `docker compose pull && docker compose up -d` on the machine after each push.
+- **Step-by-step guide:** [home-server-hosting.md](home-server-hosting.md) covers running it on a friend's server and moving it to a Pi later.
 
 ### Examples of Discord bots on a Raspberry Pi
 
