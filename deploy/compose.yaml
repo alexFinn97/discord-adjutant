@@ -6,8 +6,9 @@ services:
     env_file: .env
     restart: unless-stopped
     # Caps so the bot can't crowd out other services on a shared machine.
-    # It peaks at about 320 MB today; raise these if heavier features need it.
-    mem_limit: 1g
+    # It peaks at about 320 MB today. The current host has about 4 GB, so 2 GB leaves
+    # room for the OS; lower this on a smaller host such as a 1 GB Pi.
+    mem_limit: 2g
     cpus: "1.0"
     volumes:
       - bot-data:/data

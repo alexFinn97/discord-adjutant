@@ -18,13 +18,17 @@ push to master ──► GitHub Actions builds the image ──► ghcr.io/alexf
 - **Only the bot host joins your tailnet.** The rest of the friend's network isn't reachable through it, because the host advertises no subnet routes.
 - **Deploys can only reach port 22 on that host.** That's because of your Tailscale policy.
 
+**If the host is already set up differently:**
+- **It already has an account for you.** You can use that account in place of `deploy`. It needs to be in the `docker` group. Give GitHub its own SSH key on that account (step 4), so you can revoke it without losing your own access, and set `DEPLOY_USER` to that account's name.
+- **It already joined your tailnet** (for example with an auth key you created). Don't join it again. Add the tags to your policy (step 3), then in the admin console go to **Machines → the host → Edit ACL tags** and add `tag:bothost`.
+
 ## 1. What the friend is providing
 
 | Need | Amount |
 |---|---|
 | Machine | x86_64 or ARM64, running Linux. Best as its own VM or LXC (see step 2). |
 | Software | Docker Engine with the Compose plugin, an SSH server, and Tailscale |
-| RAM / CPU | Capped at 1 GB and 1 CPU by `deploy/compose.yaml`. The bot peaks at about 320 MB today. |
+| RAM / CPU | Capped at 2 GB and 1 CPU by `deploy/compose.yaml`. The bot peaks at about 320 MB today, so 1 GB of RAM is enough if you lower the cap. |
 | Disk | About 3 GB for the image, logs and face model |
 | Network | Outbound internet only. Nothing forwarded. |
 

@@ -16,6 +16,9 @@ dist/
 # dotenv environment variable files
 .env
 
+# Local credentials notes
+ssh-pw.txt
+
 # Downloaded MediaPipe models (fetched on first use)
 models/
 
