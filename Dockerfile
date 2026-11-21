@@ -7,9 +7,10 @@ FROM python:3.14-slim-trixie
 COPY --from=denoland/deno:bin-2.5.6 /deno /usr/local/bin/deno
 
 # ffmpeg streams audio into voice. libgl1 and libglib2.0 are needed by OpenCV,
-# and libportaudio2 by sounddevice, which mediapipe imports.
+# libportaudio2 by sounddevice, which mediapipe imports, and libegl1 and libgles2
+# by MediaPipe's face landmarker, which loads them when it starts even on CPU.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0t64 libportaudio2 \
+    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0t64 libportaudio2 libegl1 libgles2 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
@@ -22,7 +23,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Fail the build early if a native library is missing on this architecture.
+# MediaPipe only loads EGL/GLES when /gawk first runs, so load them here too.
 RUN python -c "import cv2, discord, nacl, yt_dlp, mediapipe; from mediapipe.tasks.python import vision; print('imports ok')" \
+    && python -c "import ctypes; ctypes.CDLL('libEGL.so.1'); ctypes.CDLL('libGLESv2.so.2'); print('EGL/GLES ok')" \
     && deno --version \
     && ffmpeg -version | head -n 1
 
