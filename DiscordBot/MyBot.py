@@ -184,10 +184,17 @@ SOYJAK_CUTOUT_SIDE = 400;
 SOYJAK_EDGE_THRESHOLD = 0.015;
 SOYJAK_MIN_INK_AREA = 120;
 SOYJAK_FACE_INK_PERCENT = 10;
-# Roughly how many stubble strokes overlap any one spot of the jaw.
-SOYJAK_STUBBLE_DENSITY = 1.2;
-# Line thickness, as a share of the image's longest side.
+# How wide an edge the line finder looks for, as a share of the image's longest side.
 SOYJAK_LINE_SIGMA = 0.0022;
+# Tracing: lines are redrawn this thick (share of the longest side); gaps between line ends
+# up to this long are joined (share of the longest side); lines shorter than this are dropped
+# (share of the longest side); and wobbles smaller than this many pixels are smoothed out.
+SOYJAK_LINE_WIDTH = 0.0045;
+SOYJAK_MAX_GAP = 0.03;
+SOYJAK_MIN_LINE_LENGTH = 0.02;
+SOYJAK_LINE_SMOOTHING = 1.5;
+# Most line ends considered for joining, which keeps memory use small on busy images.
+SOYJAK_MAX_LINE_ENDS = 1500;
 
 def _resize_longest_side(img, side):
     height, width = img.shape[:2];
@@ -298,32 +305,83 @@ def _line_art(img, face_box=None):
     ink = cv2.GaussianBlur(ink, (0, 0), max(1.0, max(img.shape[:2]) * 0.0012));
     return ink > 0.4;
 
-def _open_mouth(img, mouth, face_width):
-    """Looks for the dark hole of an open mouth around YuNet's mouth point.
-    Returns (centre, half width, half height) of it, or None if the mouth looks closed."""
-    height, width = img.shape[:2];
-    reach = face_width * 0.3;
-    x0, y0 = max(0, round(mouth[0] - reach)), max(0, round(mouth[1] - reach * 0.7));
-    x1, y1 = min(width, round(mouth[0] + reach)), min(height, round(mouth[1] + reach * 1.2));
-    if x1 - x0 < 5 or y1 - y0 < 5:
-        return None;
+def _line_width(shape):
+    """How thick traced lines and wrinkles are drawn, in pixels."""
+    return max(2, round(max(shape[:2]) * SOYJAK_LINE_WIDTH));
 
-    gray = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY);
-    gray = cv2.GaussianBlur(gray, (0, 0), max(1.0, face_width * 0.01));
-    # The inside of an open mouth is the darkest thing around it, well below the skin.
-    dark = ((gray <= np.percentile(gray, 12)) & (gray < np.median(gray) * 0.6)).astype(np.uint8);
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(dark, connectivity=8);
+def _bridge_gaps(skeleton, max_gap):
+    """Joins line ends that nearly meet with a straight line, so a traced line with a gap in it
+    reads as one stroke. Only joins ends of different lines that point towards each other.
+    skeleton is a uint8 array of 1-pixel-wide lines (1 ink, 0 paper); returns a new one."""
+    # A line end is an ink pixel with exactly one ink neighbour.
+    neighbours = cv2.filter2D(skeleton, -1, np.ones((3, 3), np.float32), borderType=cv2.BORDER_CONSTANT) - skeleton;
+    ends = np.argwhere((skeleton == 1) & (neighbours == 1));  # rows of (y, x)
+    if len(ends) < 2:
+        return skeleton;
+    # Keeps the distance table small on very busy images.
+    ends = ends[:SOYJAK_MAX_LINE_ENDS];
 
-    best = None;
-    for i in range(1, count):
-        if stats[i, cv2.CC_STAT_AREA] < (face_width * 0.06) ** 2:
+    _, labels = cv2.connectedComponents(skeleton, connectivity=8);
+    end_labels = labels[ends[:, 0], ends[:, 1]];
+
+    # Which way each end points: away from the rest of its line just behind it.
+    reach = 6;
+    directions = np.zeros((len(ends), 2), dtype=np.float32);
+    for i, (y, x) in enumerate(ends):
+        y0, x0 = max(0, y - reach), max(0, x - reach);
+        ys, xs = np.nonzero(labels[y0:y + reach + 1, x0:x + reach + 1] == end_labels[i]);
+        direction = np.array([x - (xs.mean() + x0), y - (ys.mean() + y0)], dtype=np.float32);
+        length = float(np.linalg.norm(direction));
+        if length > 0:
+            directions[i] = direction / length;
+
+    points = ends[:, ::-1].astype(np.float32);  # (x, y)
+    offsets = points[None, :, :] - points[:, None, :];  # offsets[i, j] = from end i to end j
+    distances = np.linalg.norm(offsets, axis=2);
+    distances[end_labels[:, None] == end_labels[None, :]] = np.inf;  # not to its own line
+
+    bridged = skeleton.copy();
+    used = np.zeros(len(ends), dtype=bool);
+    candidates = np.argwhere(np.triu(distances <= max_gap, 1));
+    for i, j in candidates[np.argsort(distances[candidates[:, 0], candidates[:, 1]])]:
+        if used[i] or used[j]:
             continue;
-        centroid = centroids[i] + (x0, y0);
-        distance = float(np.linalg.norm(centroid - mouth));
-        if distance < face_width * 0.15 and (best is None or distance < best[0]):
-            best = (distance, centroid, stats[i, cv2.CC_STAT_WIDTH] / 2, stats[i, cv2.CC_STAT_HEIGHT] / 2);
+        towards = offsets[i, j] / distances[i, j];
+        # Both ends have to roughly face each other, or it's two lines that just happen to be close.
+        if directions[i] @ towards < 0.5 or directions[j] @ -towards < 0.5:
+            continue;
+        cv2.line(bridged, tuple(int(v) for v in points[i]), tuple(int(v) for v in points[j]), 1, 1);
+        used[i] = used[j] = True;
 
-    return None if best is None else best[1:];
+    return bridged;
+
+def _trace_lines(ink):
+    """Redraws rough ink as clean pen lines: thins every stroke to its centre line, joins small
+    gaps with straight lines, drops short scraps, smooths out the wobble and draws what's left
+    at one even thickness. Returns a uint8 canvas, 0 ink and 255 paper."""
+    side = max(ink.shape);
+    skeleton = (cv2.ximgproc.thinning(ink.astype(np.uint8) * 255) > 0).astype(np.uint8);
+
+    # Clear out specks first, so they don't get joined up into lines.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(skeleton, connectivity=8);
+    keep = stats[:, cv2.CC_STAT_AREA] >= 5;
+    keep[0] = False;
+    skeleton = keep[labels].astype(np.uint8);
+
+    skeleton = _bridge_gaps(skeleton, side * SOYJAK_MAX_GAP);
+
+    # Lines still too short to read as part of the drawing are noise.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(skeleton, connectivity=8);
+    keep = stats[:, cv2.CC_STAT_AREA] >= side * SOYJAK_MIN_LINE_LENGTH;
+    keep[0] = False;
+    skeleton = keep[labels].astype(np.uint8);
+
+    # Follow each line and simplify it to fewer, straighter segments before drawing it.
+    canvas = np.full(ink.shape, 255, dtype=np.uint8);
+    contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE);
+    simplified = [cv2.approxPolyDP(c, SOYJAK_LINE_SMOOTHING, True) for c in contours];
+    cv2.polylines(canvas, simplified, True, 0, _line_width(ink.shape), cv2.LINE_AA);
+    return canvas;
 
 def _shadows(img, face, person):
     """Finds the darkest parts of the face (an open mouth, pupils, deep shadows), to fill in
@@ -350,61 +408,29 @@ def _shadows(img, face, person):
     skin = gray[inside];
     dark = (gray <= min(np.percentile(skin, 4), np.median(skin) * 0.45)) & inside;
 
-    # Keep blobs, not thin slivers along edges.
+    # Keep solid blobs like a mouth or nostril, not slivers or crescents of shadow along an edge.
     count, labels, stats, _ = cv2.connectedComponentsWithStats(dark.astype(np.uint8), connectivity=8);
-    keep = stats[:, cv2.CC_STAT_AREA] >= (face_width * 0.04) ** 2;
-    keep[0] = False;
+    keep = np.zeros(count, dtype=bool);
+    for i in range(1, count):
+        if stats[i, cv2.CC_STAT_AREA] < (face_width * 0.04) ** 2:
+            continue;
+        contours, _ = cv2.findContours((labels == i).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE);
+        hull_area = cv2.contourArea(cv2.convexHull(max(contours, key=cv2.contourArea)));
+        keep[i] = hull_area > 0 and stats[i, cv2.CC_STAT_AREA] / hull_area >= 0.6;
     shadows[y0:y1, x0:x1] = keep[labels];
     return shadows;
 
-def _draw_soyjak_features(canvas, img, face, person, rng):
-    """Draws stubble and forehead wrinkles onto canvas (0 ink, 255 paper).
-    img is the photo, used to keep the stubble off the real mouth."""
-    _, _, mouth, face_width, _ = face;
-    eye_middle, right, down, tilt = _face_axes(face);
+def _draw_wrinkles(canvas, face, rng):
+    """Draws a few wavy forehead wrinkles above the brows onto canvas (0 ink, 255 paper),
+    uneven like hand-drawn ones and as thick as the traced lines."""
+    face_width = face[3];
+    eye_middle, right, down, _ = _face_axes(face);
 
     def point(origin, along_right, along_down):
         p = origin + right * along_right * face_width + down * along_down * face_width;
         return (round(float(p[0])), round(float(p[1])));
 
-    # Where the mouth is, so the stubble stays off it: the open hole if there is one,
-    # otherwise a lip-sized area around YuNet's mouth point.
-    opening = _open_mouth(img, mouth, face_width);
-    if opening is None:
-        mouth_centre = point(mouth, 0, 0);
-        mouth_axes = (face_width * 0.2, face_width * 0.1);
-    else:
-        centre, half_width, half_height = opening;
-        mouth_centre = (round(float(centre[0])), round(float(centre[1])));
-        mouth_axes = (max(half_width, face_width * 0.1), max(half_height, face_width * 0.06));
-
-    # Stubble: short strokes on the chin, jaw and upper lip, avoiding the mouth.
-    stubble = np.zeros(canvas.shape, dtype=np.uint8);
-    jaw_centre = point(mouth, 0, 0.02);
-    cv2.ellipse(stubble, jaw_centre, (round(face_width * 0.45), round(face_width * 0.42)), tilt, 0, 360, 1, -1);
-    # Not above the nostrils.
-    nose_line = eye_middle + down * face_width * 0.42;
-    cv2.ellipse(stubble, mouth_centre, (round(mouth_axes[0] * 1.35), round(mouth_axes[1] * 1.25)), tilt, 0, 360, 0, -1);
-    ys, xs = np.nonzero(stubble & (person > 0));
-    if len(xs):
-        above_nose = ((np.stack([xs, ys], axis=1) - nose_line) @ down) < 0;
-        xs, ys = xs[~above_nose], ys[~above_nose];
-    if len(xs):
-        # Enough strokes to cover the same share of the jaw on any size of face.
-        # Hairs grow with the face, up to a cap, so close-ups get fine stubble rather than sticks.
-        stroke = min(face_width * 0.02, max(canvas.shape) * 0.009);
-        count = min(len(xs), round(len(xs) * SOYJAK_STUBBLE_DENSITY / stroke ** 2));
-        picks = rng.choice(len(xs), size=count, replace=False);
-        hair = 1 if stroke < 8 else 2;
-        for i in picks:
-            angle = rng.uniform(0, np.pi);
-            length = stroke * rng.uniform(0.4, 1.2);
-            dx, dy = np.cos(angle) * length / 2, np.sin(angle) * length / 2;
-            cv2.line(canvas, (round(xs[i] - dx), round(ys[i] - dy)), (round(xs[i] + dx), round(ys[i] + dy)), 0, hair, cv2.LINE_AA);
-
-    # Forehead wrinkles: a few wavy lines above the brows, uneven like hand-drawn ones,
-    # as thick as the rest of the line art.
-    line = max(2, round(max(canvas.shape) * 0.003));
+    line = _line_width(canvas.shape);
     for i in range(3):
         half_length = rng.uniform(0.12, 0.2);
         shift = rng.uniform(-0.04, 0.04);
@@ -435,15 +461,15 @@ def _soyjakify(image_data):
         outline[:2, :] = outline[-2:, :] = False;
         outline[:, :2] = outline[:, -2:] = False;
         ink |= outline;
-        shadows = _shadows(img, face, person);
-        ink |= shadows;
 
-    canvas = np.where(ink, 0, 255).astype(np.uint8);
+    canvas = _trace_lines(ink);
 
     if face is not None:
-        # Same image, same stubble.
+        # Solid black areas go on after tracing, which would otherwise thin them to lines.
+        canvas[_shadows(img, face, person)] = 0;
+        # Same image, same wrinkles.
         rng = np.random.default_rng(int.from_bytes(hashlib.sha256(image_data).digest()[:8], "little"));
-        _draw_soyjak_features(canvas, img, face, person & ~shadows, rng);
+        _draw_wrinkles(canvas, face, rng);
 
     ok, png = cv2.imencode(".png", canvas);
     if not ok:

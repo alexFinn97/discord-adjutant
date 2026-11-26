@@ -21,7 +21,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Fail the build early if a native library is missing on this architecture.
-RUN python -c "import cv2, discord, nacl, yt_dlp; cv2.FaceDetectorYN; print('imports ok')" \
+RUN python -c "import cv2, discord, nacl, yt_dlp; cv2.FaceDetectorYN; cv2.ximgproc.thinning; print('imports ok')" \
     && deno --version \
     && ffmpeg -version | head -n 1
 
