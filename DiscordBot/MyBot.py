@@ -232,18 +232,20 @@ def _person_mask(img, face):
     cv2.fillPoly(mask, [bust], cv2.GC_PR_FGD);
     cv2.ellipse(mask, at(0, 0.05), (max(1, round(box_width * 0.42)), max(1, round(box_height * 0.48))), tilt, 0, 360, cv2.GC_FGD, -1);
 
-    # With hardly any background left to learn from (a close-up), keep the whole image.
-    if np.count_nonzero(mask == cv2.GC_BGD) < small.size // 3 * 0.05:
-        return np.ones((height, width), dtype=np.uint8);
+    # With hardly any background left to learn from (a close-up), GrabCut can't work,
+    # so fall back to the bust shape itself; it still blanks the corners around the head.
+    bust_shape = np.isin(mask, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.uint8);
+    if np.count_nonzero(mask == cv2.GC_BGD) >= small.size // 3 * 0.01:
+        try:
+            # GrabCut starts from random guesses; a fixed seed makes the same picture cut out the same way.
+            cv2.setRNGSeed(0);
+            cv2.grabCut(small, mask, None, np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64), 5, cv2.GC_INIT_WITH_MASK);
+        except cv2.error:
+            mask = None;
+    else:
+        mask = None;
 
-    try:
-        # GrabCut starts from random guesses; a fixed seed makes the same picture cut out the same way.
-        cv2.setRNGSeed(0);
-        cv2.grabCut(small, mask, None, np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64), 5, cv2.GC_INIT_WITH_MASK);
-    except cv2.error:
-        return np.ones((height, width), dtype=np.uint8);
-
-    person = np.isin(mask, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.uint8);
+    person = bust_shape if mask is None else np.isin(mask, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.uint8);
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5));
     person = cv2.morphologyEx(person, cv2.MORPH_OPEN, kernel);
     person = cv2.morphologyEx(person, cv2.MORPH_CLOSE, kernel);
@@ -337,7 +339,12 @@ def _shadows(img, face, person):
 
     gray = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY);
     gray = cv2.GaussianBlur(gray, (0, 0), max(1.0, face_width * 0.006));
-    inside = person[y0:y1, x0:x1] > 0;
+    # Only the middle of the face (eyes, nostrils, mouth), so dark background or shadows
+    # along the jaw stay as lines rather than becoming black blobs.
+    middle = np.zeros((height, width), dtype=np.uint8);
+    cv2.ellipse(middle, (round(x + w / 2), round(y + h * 0.55)), (round(w * 0.36), round(h * 0.4)),
+                _face_axes(face)[3], 0, 360, 1, -1);
+    inside = (person[y0:y1, x0:x1] > 0) & (middle[y0:y1, x0:x1] > 0);
     if not inside.any():
         return shadows;
     skin = gray[inside];
@@ -355,7 +362,6 @@ def _draw_soyjak_features(canvas, img, face, person, rng):
     img is the photo, used to keep the stubble off the real mouth."""
     _, _, mouth, face_width, _ = face;
     eye_middle, right, down, tilt = _face_axes(face);
-    thickness = max(1, round(face_width * 0.012));
 
     def point(origin, along_right, along_down):
         p = origin + right * along_right * face_width + down * along_down * face_width;
@@ -366,7 +372,7 @@ def _draw_soyjak_features(canvas, img, face, person, rng):
     opening = _open_mouth(img, mouth, face_width);
     if opening is None:
         mouth_centre = point(mouth, 0, 0);
-        mouth_axes = (face_width * 0.14, face_width * 0.08);
+        mouth_axes = (face_width * 0.2, face_width * 0.1);
     else:
         centre, half_width, half_height = opening;
         mouth_centre = (round(float(centre[0])), round(float(centre[1])));
@@ -385,21 +391,30 @@ def _draw_soyjak_features(canvas, img, face, person, rng):
         xs, ys = xs[~above_nose], ys[~above_nose];
     if len(xs):
         # Enough strokes to cover the same share of the jaw on any size of face.
-        stroke = face_width * 0.02;
+        # Hairs grow with the face, up to a cap, so close-ups get fine stubble rather than sticks.
+        stroke = min(face_width * 0.02, max(canvas.shape) * 0.009);
         count = min(len(xs), round(len(xs) * SOYJAK_STUBBLE_DENSITY / stroke ** 2));
         picks = rng.choice(len(xs), size=count, replace=False);
-        hair = max(1, round(face_width * 0.0025));
+        hair = 1 if stroke < 8 else 2;
         for i in picks:
             angle = rng.uniform(0, np.pi);
             length = stroke * rng.uniform(0.4, 1.2);
             dx, dy = np.cos(angle) * length / 2, np.sin(angle) * length / 2;
             cv2.line(canvas, (round(xs[i] - dx), round(ys[i] - dy)), (round(xs[i] + dx), round(ys[i] + dy)), 0, hair, cv2.LINE_AA);
 
-    # Forehead wrinkles: a few shallow arcs above the brows.
+    # Forehead wrinkles: a few wavy lines above the brows, uneven like hand-drawn ones,
+    # as thick as the rest of the line art.
+    line = max(2, round(max(canvas.shape) * 0.003));
     for i in range(3):
-        centre = point(eye_middle, rng.uniform(-0.03, 0.03), -0.22 - i * 0.06);
-        axes = (round(face_width * rng.uniform(0.14, 0.2)), round(face_width * 0.035));
-        cv2.ellipse(canvas, centre, axes, tilt, 200, 340, 0, thickness, cv2.LINE_AA);
+        half_length = rng.uniform(0.12, 0.2);
+        shift = rng.uniform(-0.04, 0.04);
+        height = -0.22 - i * 0.065 + rng.uniform(-0.01, 0.01);
+        phase = rng.uniform(0, 2 * np.pi);
+        along = np.linspace(-half_length, half_length, 24);
+        # Arched up in the middle, with a small wobble along the way.
+        rise = height - 0.03 * (1 - (along / half_length) ** 2) + 0.008 * np.sin(along * 40 + phase);
+        points = np.array([point(eye_middle, shift + a, r) for a, r in zip(along, rise)], dtype=np.int32);
+        cv2.polylines(canvas, [points], False, 0, line, cv2.LINE_AA);
 
 def _soyjakify(image_data):
     """Redraws the image as a black-and-white soyjak. Returns PNG bytes.
