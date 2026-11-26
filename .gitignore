@@ -19,7 +19,7 @@ dist/
 # Local credentials notes
 ssh-pw.txt
 
-# Downloaded MediaPipe models (fetched on first use)
+# Downloaded face detection model (fetched on first use)
 models/
 
 # Virtual environments

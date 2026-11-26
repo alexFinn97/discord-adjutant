@@ -14,11 +14,11 @@ A Discord bot running on a private server with my friends, written in Python wit
 
 - **Slash commands** use discord.py's `app_commands` and are synced with Discord when the bot starts.
 - **Music:** [yt-dlp](https://github.com/yt-dlp/yt-dlp) searches YouTube and resolves the audio stream URL. The search runs in a thread-pool executor so it doesn't block the bot's event loop. FFmpeg then streams the audio into the voice channel.
-- **Gawk:** the image is downloaded and decoded with OpenCV, and anything larger than 2048 pixels on its longest side is scaled down to that size to keep memory use low. The [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker) finds the face landmarks, then a funhouse-mirror "bulge" warp (built with OpenCV's `remap`) magnifies the eyes and mouth, sized to the width of the face. The image work runs in a background thread so the bot stays responsive, and the result is sent from memory without writing a file.
+- **Gawk:** the image is downloaded and decoded with OpenCV, and anything larger than 2048 pixels on its longest side is scaled down to that size to keep memory use low. OpenCV's [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) face detector finds the biggest face along with its eyes and mouth corners, and each eye point is nudged onto the darkest iris-sized spot nearby. Then a funhouse-mirror "bulge" warp (built with OpenCV's `remap`) magnifies the eyes and mouth, sized to the width of the face. The image work runs in a background thread so the bot stays responsive, and the result is sent from memory without writing a file.
 
 ## Tech
 
-Python 3.14 · discord.py 2.7 · yt-dlp · FFmpeg · OpenCV · MediaPipe 1.2 · NumPy · python-dotenv · Docker
+Python 3.14 · discord.py 2.7 · yt-dlp · FFmpeg · OpenCV (YuNet) · NumPy · python-dotenv · Docker
 
 ## Running it locally
 
@@ -88,7 +88,7 @@ FORCE_SYNC=0
 | `GUILD_ID` | The ID of your server. `/gawk` is registered to this server only. |
 | `FORCE_SYNC` | `1` copies all commands to your server and syncs them there, so changes appear straight away. `0` (the default) syncs them globally, which can take a while to show up. |
 | `FFMPEG_PATH` | Optional. Path to an FFmpeg executable, if you don't want the bundled one or the one on your PATH. |
-| `FACE_MODEL_PATH` | Optional. Where to keep the face landmark model. Defaults to `DiscordBot\models\face_landmarker.task`. |
+| `FACE_MODEL_PATH` | Optional. Where to keep the face detection model. Defaults to `DiscordBot\models\face_detection_yunet_2023mar.onnx`. |
 
 ### 4. Run
 
@@ -159,7 +159,7 @@ Only run one copy of the bot per token. Stop the local one before the VM's start
 
 ## Notes
 
-- The first time `/gawk` runs, the bot downloads MediaPipe's face landmark model (about 3.6 MB) from Google into `DiscordBot\models`. That folder is ignored by git.
+- The first time `/gawk` runs, the bot downloads OpenCV's YuNet face detection model (about 230 KB) from the [opencv_zoo](https://github.com/opencv/opencv_zoo) repository into `DiscordBot\models`, and checks it against a SHA-256 checksum. That folder is ignored by git.
 - `/play` replaces whatever is playing; there's no queue yet.
 
 ## License

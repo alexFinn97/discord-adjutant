@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import discord
@@ -10,9 +11,6 @@ import cv2
 import requests
 import threading
 import numpy as np
-import mediapipe as mp
-from mediapipe.tasks.python import BaseOptions
-from mediapipe.tasks.python import vision
 
 load_dotenv();
 TOKEN = os.getenv("DISCORD_TOKEN");
@@ -32,11 +30,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__));
 BUNDLED_FFMPEG = os.path.join(BASE_DIR, "bin", "ffmpeg", "ffmpeg.exe");
 FFMPEG_PATH = os.getenv("FFMPEG_PATH") or (BUNDLED_FFMPEG if os.path.isfile(BUNDLED_FFMPEG) else "ffmpeg");
 
-# Face landmark model for /gawk, downloaded on first use if it isn't there yet.
-FACE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-FACE_MODEL_PATH = os.getenv("FACE_MODEL_PATH") or os.path.join(BASE_DIR, "models", "face_landmarker.task");
-_face_landmarker = None;
-_face_landmarker_lock = threading.Lock();
+# Face detection model for /gawk (OpenCV's YuNet), downloaded on first use if it isn't there yet.
+# It runs on any x86_64 or ARM64 CPU; MediaPipe, used before, needs AVX, which some VMs hide.
+FACE_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx";
+FACE_MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4";
+FACE_MODEL_PATH = os.getenv("FACE_MODEL_PATH") or os.path.join(BASE_DIR, "models", "face_detection_yunet_2023mar.onnx");
+_face_detector = None;
+_face_detector_lock = threading.Lock();
+
+# YuNet finds faces best when they're up to a few hundred pixels across, so it looks at
+# shrunken copies of the image: first this size, then smaller for close-ups.
+FACE_DETECT_SIDES = (640, 320);
+FACE_MIN_SCORE = 0.8;
 
 # /gawk shrinks bigger images to this many pixels on their longest side before warping.
 # The warp builds several full-size arrays, so a 12 MP phone photo would otherwise peak at ~700 MB.
@@ -50,24 +55,68 @@ def _extract(query, ydl_opts):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(query, download=False);
 
-def _get_face_landmarker():
-    """Creates the MediaPipe face landmarker once, downloading its model on first use."""
-    global _face_landmarker;
-    if _face_landmarker is None:
+def _get_face_detector():
+    """Creates the YuNet face detector once, downloading its model on first use."""
+    global _face_detector;
+    if _face_detector is None:
         if not os.path.isfile(FACE_MODEL_PATH):
-            os.makedirs(os.path.dirname(FACE_MODEL_PATH), exist_ok=True);
             response = requests.get(FACE_MODEL_URL, timeout=60);
             response.raise_for_status();
+            if hashlib.sha256(response.content).hexdigest() != FACE_MODEL_SHA256:
+                raise RuntimeError("Downloaded face model doesn't match its expected checksum.");
+            os.makedirs(os.path.dirname(FACE_MODEL_PATH), exist_ok=True);
             with open(FACE_MODEL_PATH, "wb") as f:
                 f.write(response.content);
 
-        options = vision.FaceLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=FACE_MODEL_PATH),
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=1
-        );
-        _face_landmarker = vision.FaceLandmarker.create_from_options(options);
-    return _face_landmarker;
+        _face_detector = cv2.FaceDetectorYN.create(FACE_MODEL_PATH, "", (320, 320), FACE_MIN_SCORE);
+    return _face_detector;
+
+def _find_face(img):
+    """Finds the biggest face in the image.
+    Returns (eye, eye, mouth centre, face width) in the image's pixels, or None if there's no face."""
+    height, width = img.shape[:2];
+    longest_side = max(height, width);
+    scales = sorted({min(1.0, side / longest_side) for side in FACE_DETECT_SIDES}, reverse=True);
+
+    for scale in scales:
+        small = img if scale == 1.0 else cv2.resize(
+            img, (max(1, round(width * scale)), max(1, round(height * scale))), interpolation=cv2.INTER_AREA);
+
+        # The detector is shared between commands, so only one image is processed at a time.
+        with _face_detector_lock:
+            detector = _get_face_detector();
+            detector.setInputSize((small.shape[1], small.shape[0]));
+            _, faces = detector.detect(small);
+
+        if faces is not None and len(faces):
+            # Each row: box x, y, w, h, then eye, eye, nose, mouth corner, mouth corner (x, y), then score.
+            face = max(faces, key=lambda f: f[2] * f[3]) / scale;
+            face_width = face[2];
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY);
+            eye_1 = _centre_on_iris(gray, face[4:6], face_width);
+            eye_2 = _centre_on_iris(gray, face[6:8], face_width);
+            mouth = (face[10:12] + face[12:14]) / 2;
+            return eye_1, eye_2, mouth, face_width;
+
+    return None;
+
+def _centre_on_iris(gray, eye, face_width):
+    """YuNet's eye points can be a few percent of the face off the pupil, which smears the bulge.
+    This moves the point to the darkest iris-sized spot close to it."""
+    rx = max(2, round(face_width * 0.07));
+    ry = max(2, round(face_width * 0.04));  # shorter vertically, to stay clear of the eyebrow
+    x, y = round(float(eye[0])), round(float(eye[1]));
+    x0, y0 = max(0, x - rx), max(0, y - ry);
+    roi = gray[y0:y + ry + 1, x0:x + rx + 1].astype(np.float32);
+    if roi.size == 0:
+        return eye;
+
+    roi = cv2.GaussianBlur(roi, (0, 0), max(1.0, face_width * 0.02));
+    # Favour spots near the original point, so dark lashes or eyebrows at the edge don't win.
+    yy, xx = np.mgrid[y0:y0 + roi.shape[0], x0:x0 + roi.shape[1]];
+    roi += 40 * (((xx - eye[0]) / rx) ** 2 + ((yy - eye[1]) / ry) ** 2);
+    _, _, (min_x, min_y), _ = cv2.minMaxLoc(roi);
+    return np.array([x0 + min_x, y0 + min_y], dtype=np.float32);
 
 def _bulge(img, bulges, strength):
     """Magnifies circular areas of the image, like a funhouse mirror.
@@ -105,29 +154,16 @@ def _warp_face(image_data):
         new_size = (max(1, round(width * scale)), max(1, round(height * scale)));
         img = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA);
 
-    rgb_image = np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB));
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image);
-
-    # The landmarker is shared between commands, so only one image is processed at a time.
-    with _face_landmarker_lock:
-        result = _get_face_landmarker().detect(mp_image);
-
-    if not result.face_landmarks:
+    face = _find_face(img);
+    if face is None:
         return None;
 
-    # Use the first face found and convert its normalised landmarks to pixel coordinates.
-    landmarks = result.face_landmarks[0];
-    points = np.array(
-        [[lm.x * img.shape[1], lm.y * img.shape[0]] for lm in landmarks],
-        dtype=np.float32
-    );
-
     # Bulge the eyes and mouth, sized relative to the width of the face.
-    face_width = np.linalg.norm(points[454] - points[234]);  # cheek to cheek
+    eye_1, eye_2, mouth, face_width = face;
     bulges = [
-        (points[468], face_width * 0.22),                    # one iris centre
-        (points[473], face_width * 0.22),                    # the other iris centre
-        ((points[13] + points[14]) / 2, face_width * 0.30),  # centre of the mouth
+        (eye_1, face_width * 0.22),
+        (eye_2, face_width * 0.22),
+        (mouth, face_width * 0.30),
     ];
     warped_image = _bulge(img, bulges, strength=0.7);
 

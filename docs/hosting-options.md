@@ -5,9 +5,9 @@ Researched November 2026. Free tiers change often, so check each provider's page
 ## What the bot needs from a host
 
 - **An always-on process.** The bot keeps a gateway websocket open to Discord and joins voice channels over UDP. That rules out anything serverless or request-driven (Azure Functions, App Service Free, Cloudflare Workers, HTTP interactions endpoints).
-- **About 1 GB of RAM.** `/gawk` loads MediaPipe and OpenCV. Expect roughly 400–700 MB in use, so a 1 GB VM works only with swap.
+- **About 1 GB of RAM.** `/gawk` processes images with OpenCV. It used up to about 700 MB when it also loaded MediaPipe (since removed), so on a 1 GB VM add swap to be safe.
 - **An IP that YouTube accepts.** `/play` resolves streams with yt-dlp. YouTube often answers cloud and datacenter IPs with *"Sign in to confirm you're not a bot"*. This is the biggest risk for every cloud option below.
-- **x86_64 or ARM64.** Both work from mediapipe 1.x onwards. 0.10.32 had no Linux ARM64 wheel.
+- **x86_64 or ARM64.** Both work. The CPU doesn't need AVX, which some VMs hide: `/gawk` uses OpenCV's YuNet face detector rather than MediaPipe, which needed it.
 
 ## Comparison
 
@@ -83,7 +83,7 @@ This is a workaround, not what F1 is designed for, but it costs nothing.
 | --- | --- |
 | 165 MB outbound/day per region | The main constraint. Go over and the app is stopped (HTTP 403) until midnight UTC. Music at discord.py's default 128 kbps uses about 1 MB/min, so roughly 2.5 hours a day. Lowering it to 64 kbps roughly doubles that, at slightly lower quality. Each `/gawk` image is 1–2 MB. |
 | 60 CPU min/day, 3 per 5 min | Probably fine. An idle bot uses almost nothing, `/gawk` takes a few CPU seconds, and an hour of music is a few CPU minutes. Go over and the app stops until the quota resets. |
-| 1 GB RAM | Enough for MediaPipe. |
+| 1 GB RAM | Enough for `/gawk`. |
 | No Always On | Platform restarts leave the bot offline until the next ping arrives. |
 
 **Unknowns to test before relying on it**
@@ -98,7 +98,7 @@ Functions run per request, so they can't hold the bot's gateway or voice connect
 
 - **`/gawk` could work this way.** The function would read channel history and post the image through Discord's REST API.
 - **`/play` can't.** Voice needs a live gateway connection.
-- **The 3-second deadline is a risk.** Discord needs a reply within 3 seconds. A cold start of a Python function that loads MediaPipe can take longer, so the command would sometimes fail.
+- **The 3-second deadline is a risk.** Discord needs a reply within 3 seconds. A cold start of a Python function that loads OpenCV and the face model can take longer, so the command would sometimes fail.
 - **It means two codebases.** The bot would split into an interactions app plus something else for music.
 
 The Linux Consumption plan is being retired (no new apps through the portal since September 2025, fully retired after 30 September 2028). Its replacement, Flex Consumption, has a smaller monthly free grant.
@@ -205,7 +205,7 @@ Running a Discord bot on a Pi is common, and some well-known projects document i
 
 **How these compare with this bot**
 - **`/play`:** the FFmpeg, yt-dlp and voice setup is well proven on Pis.
-- **`/gawk`:** this is the less common part. MediaPipe has had a Linux ARM64 wheel only since 1.x. Version 1.2.3 has been tested on Windows but not yet on a Pi.
+- **`/gawk`:** OpenCV has ARM64 Linux wheels and its YuNet face detector has no special CPU needs, but it hasn't been tested on a Pi yet.
 - **OS version:** most guides target Raspberry Pi OS Bookworm. The Docker image ships its own Python 3.14, so the Pi's OS version matters less.
 
 ## The `/play` problem on cloud hosts
