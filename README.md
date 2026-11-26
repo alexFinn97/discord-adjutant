@@ -1,6 +1,6 @@
 # discord-adjutant
 
-A Discord bot running on a private server with my friends, written in Python with [discord.py](https://discordpy.readthedocs.io/). It adds random and silly slash commands when needed: so far, a music player and a face-warping image command.
+A Discord bot running on a private server with my friends, written in Python with [discord.py](https://discordpy.readthedocs.io/). It adds random and silly slash commands when needed: so far, a music player and two image commands that mess with faces.
 
 ## Commands
 
@@ -9,12 +9,14 @@ A Discord bot running on a private server with my friends, written in Python wit
 | `/play <song_query>` | Joins your voice channel, searches YouTube for the query and streams the top result. |
 | `/stop` | Disconnects the bot from voice, which stops playback. |
 | `/gawk` | Finds the most recent image in the channel (within the last 50 messages), detects a face and blows up its eyes and mouth, then posts the result. Only registered on the server set in `GUILD_ID`. |
+| `/soyjak` | Finds the most recent image the same way and redraws it as black-and-white soyjak line art, with the background whited out and stubble and forehead wrinkles added. With no face in the image, it posts plain line art. Only registered on the server set in `GUILD_ID`. |
 
 ## How it works
 
 - **Slash commands** use discord.py's `app_commands` and are synced with Discord when the bot starts.
 - **Music:** [yt-dlp](https://github.com/yt-dlp/yt-dlp) searches YouTube and resolves the audio stream URL. The search runs in a thread-pool executor so it doesn't block the bot's event loop. FFmpeg then streams the audio into the voice channel.
 - **Gawk:** the image is downloaded and decoded with OpenCV, and anything larger than 2048 pixels on its longest side is scaled down to that size to keep memory use low. OpenCV's [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) face detector finds the biggest face along with its eyes and mouth corners, and each eye point is nudged onto the darkest iris-sized spot nearby. Then a funhouse-mirror "bulge" warp (built with OpenCV's `remap`) magnifies the eyes and mouth, sized to the width of the face. The image work runs in a background thread so the bot stays responsive, and the result is sent from memory without writing a file.
+- **Soyjak:** the image is scaled to 1024 pixels on its longest side and the same YuNet detector finds the face. OpenCV's GrabCut separates the person from the background, starting from a head-and-shoulders shape around the face, and the background is whited out. The photo is contrast-boosted (CLAHE) and flattened with an edge-preserving filter, then a difference-of-Gaussians filter picks out the edges as ink lines; the line threshold adapts so even dark or blurry faces get lines. The darkest parts of the face (an open mouth, nostrils) are filled solid black, then stubble strokes and forehead wrinkles are drawn on, following the tilt of the head. Stubble placement is seeded from the image, so the same picture always gives the same result.
 
 ## Tech
 
@@ -50,8 +52,8 @@ Treat the token like a password. If it ever leaks, reset it here; the old one st
    | --- | --- |
    | View Channels | Seeing the channel a command is used in |
    | Send Messages | Replying to commands |
-   | Attach Files | Posting the `/gawk` image |
-   | Read Message History | Finding the latest image for `/gawk` |
+   | Attach Files | Posting the `/gawk` and `/soyjak` images |
+   | Read Message History | Finding the latest image for `/gawk` and `/soyjak` |
    | Connect | Joining voice for `/play` |
    | Speak | Playing audio |
 
@@ -85,7 +87,7 @@ FORCE_SYNC=0
 | Variable | Purpose |
 | --- | --- |
 | `DISCORD_TOKEN` | The bot token from the Developer Portal. Keep it secret. |
-| `GUILD_ID` | The ID of your server. `/gawk` is registered to this server only. |
+| `GUILD_ID` | The ID of your server. `/gawk` and `/soyjak` are registered to this server only. |
 | `FORCE_SYNC` | `1` copies all commands to your server and syncs them there, so changes appear straight away. `0` (the default) syncs them globally, which can take a while to show up. |
 | `FFMPEG_PATH` | Optional. Path to an FFmpeg executable, if you don't want the bundled one or the one on your PATH. |
 | `FACE_MODEL_PATH` | Optional. Where to keep the face detection model. Defaults to `DiscordBot\models\face_detection_yunet_2023mar.onnx`. |
@@ -96,7 +98,7 @@ FORCE_SYNC=0
 python MyBot.py
 ```
 
-You should see `Server commands synced: gawk` and then `<bot name> is online!` in the console. Leave it running while you use the bot, and press **Ctrl+C** to stop it.
+You should see `Server commands synced: gawk, soyjak` and then `<bot name> is online!` in the console. Leave it running while you use the bot, and press **Ctrl+C** to stop it.
 
 If the commands don't appear in Discord:
 

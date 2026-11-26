@@ -74,7 +74,8 @@ def _get_face_detector():
 
 def _find_face(img):
     """Finds the biggest face in the image.
-    Returns (eye, eye, mouth centre, face width) in the image's pixels, or None if there's no face."""
+    Returns (eye, eye, mouth centre, face width, face box as x, y, w, h) in the image's pixels,
+    or None if there's no face."""
     height, width = img.shape[:2];
     longest_side = max(height, width);
     scales = sorted({min(1.0, side / longest_side) for side in FACE_DETECT_SIDES}, reverse=True);
@@ -97,7 +98,7 @@ def _find_face(img):
             eye_1 = _centre_on_iris(gray, face[4:6], face_width);
             eye_2 = _centre_on_iris(gray, face[6:8], face_width);
             mouth = (face[10:12] + face[12:14]) / 2;
-            return eye_1, eye_2, mouth, face_width;
+            return eye_1, eye_2, mouth, face_width, face[0:4];
 
     return None;
 
@@ -160,7 +161,7 @@ def _warp_face(image_data):
         return None;
 
     # Bulge the eyes and mouth, sized relative to the width of the face.
-    eye_1, eye_2, mouth, face_width = face;
+    eye_1, eye_2, mouth, face_width, _ = face;
     bulges = [
         (eye_1, face_width * 0.22),
         (eye_2, face_width * 0.22),
@@ -171,6 +172,267 @@ def _warp_face(image_data):
     ok, png = cv2.imencode(".png", warped_image);
     if not ok:
         raise ValueError("Warped image could not be encoded.");
+    return png.tobytes();
+
+# /soyjak redraws images at this many pixels on their longest side, so the lines come out
+# the same thickness whatever size the photo was.
+SOYJAK_SIDE = 1024;
+# Cutting out the background (GrabCut) is slow, so it works on a smaller copy this size.
+SOYJAK_CUTOUT_SIDE = 400;
+# Line art: how much an edge has to darken to become a line (0-1), and the smallest blob of
+# ink, in pixels, that's kept rather than treated as noise.
+SOYJAK_EDGE_THRESHOLD = 0.015;
+SOYJAK_MIN_INK_AREA = 120;
+SOYJAK_FACE_INK_PERCENT = 10;
+# Roughly how many stubble strokes overlap any one spot of the jaw.
+SOYJAK_STUBBLE_DENSITY = 1.2;
+# Line thickness, as a share of the image's longest side.
+SOYJAK_LINE_SIGMA = 0.0022;
+
+def _resize_longest_side(img, side):
+    height, width = img.shape[:2];
+    scale = side / max(height, width);
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC;
+    return cv2.resize(img, (max(1, round(width * scale)), max(1, round(height * scale))), interpolation=interpolation);
+
+def _face_axes(face):
+    """Returns (point between the eyes, unit vector to the face's right, unit vector down
+    towards its chin, tilt in degrees), so drawings can follow a tilted head."""
+    eye_1, eye_2 = face[0], face[1];
+    eye_left, eye_right = sorted((eye_1, eye_2), key=lambda e: e[0]);
+    across = eye_right - eye_left;
+    tilt = float(np.degrees(np.arctan2(across[1], across[0])));
+    right = across / max(1e-6, float(np.linalg.norm(across)));
+    down = np.array([-right[1], right[0]], dtype=np.float32);
+    return (eye_left + eye_right) / 2, right, down, tilt;
+
+def _person_mask(img, face):
+    """Guesses which pixels belong to the person, using GrabCut seeded from the face.
+    Returns a uint8 mask the size of img: 1 for the person, 0 for the background."""
+    height, width = img.shape[:2];
+    scale = min(1.0, SOYJAK_CUTOUT_SIDE / max(height, width));
+    small = img if scale == 1.0 else _resize_longest_side(img, SOYJAK_CUTOUT_SIDE);
+    small_height, small_width = small.shape[:2];
+    x, y, box_width, box_height = (float(v) * scale for v in face[4]);
+    centre = np.array([x + box_width / 2, y + box_height / 2], dtype=np.float32);
+    _, right, down, tilt = _face_axes(face);
+
+    def at(across, along):
+        """A point measured from the middle of the face, in face widths and heights, following its tilt."""
+        p = centre + right * across * box_width + down * along * box_height;
+        return (round(float(p[0])), round(float(p[1])));
+
+    # The person is probably inside a bust shape around the face: a head with room for hair,
+    # then a neck widening into shoulders down past the bottom of the image. If GrabCut can't
+    # tell them from the background, the cut-out is still this shape rather than a box.
+    # The middle of the face surely is them.
+    mask = np.full((small_height, small_width), cv2.GC_BGD, dtype=np.uint8);
+    cv2.ellipse(mask, at(0, -0.05), (round(box_width * 0.75), round(box_height * 0.95)), tilt, 0, 360, cv2.GC_PR_FGD, -1);
+    bust = np.array([at(-0.45, 0.5), at(0.45, 0.5), at(1.3, 1.1), at(1.3, 8), at(-1.3, 8), at(-1.3, 1.1)], dtype=np.int32);
+    cv2.fillPoly(mask, [bust], cv2.GC_PR_FGD);
+    cv2.ellipse(mask, at(0, 0.05), (max(1, round(box_width * 0.42)), max(1, round(box_height * 0.48))), tilt, 0, 360, cv2.GC_FGD, -1);
+
+    # With hardly any background left to learn from (a close-up), keep the whole image.
+    if np.count_nonzero(mask == cv2.GC_BGD) < small.size // 3 * 0.05:
+        return np.ones((height, width), dtype=np.uint8);
+
+    try:
+        # GrabCut starts from random guesses; a fixed seed makes the same picture cut out the same way.
+        cv2.setRNGSeed(0);
+        cv2.grabCut(small, mask, None, np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64), 5, cv2.GC_INIT_WITH_MASK);
+    except cv2.error:
+        return np.ones((height, width), dtype=np.uint8);
+
+    person = np.isin(mask, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.uint8);
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5));
+    person = cv2.morphologyEx(person, cv2.MORPH_OPEN, kernel);
+    person = cv2.morphologyEx(person, cv2.MORPH_CLOSE, kernel);
+
+    # Keep only the biggest piece, with any holes in it filled.
+    contours, _ = cv2.findContours(person, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE);
+    if not contours:
+        return np.ones((height, width), dtype=np.uint8);
+    person = np.zeros_like(person);
+    cv2.drawContours(person, [max(contours, key=cv2.contourArea)], -1, 1, -1);
+
+    # Scale back up with smooth edges rather than blocky ones.
+    person = cv2.resize(person.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR);
+    person = cv2.GaussianBlur(person, (0, 0), max(1.0, max(height, width) * 0.004));
+    return (person > 0.5).astype(np.uint8);
+
+def _line_art(img, face_box=None):
+    """Turns a photo into black lines on white, like a drawing. Returns a bool array, True for ink.
+    With a face box, the line threshold adapts so the face always gets some lines."""
+    # Even out the contrast first, so dark or washed-out photos still get lines.
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB);
+    lab[:, :, 0] = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(lab[:, :, 0]);
+    img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR);
+    # Flatten skin, fabric and foliage into plain areas, keeping only the bigger shapes' edges.
+    flat = cv2.edgePreservingFilter(img, flags=cv2.RECURS_FILTER, sigma_s=40, sigma_r=0.35);
+    gray = cv2.cvtColor(flat, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255;
+
+    # Difference of Gaussians: negative just on the dark side of an edge, which is where a pen goes.
+    sigma = max(img.shape[:2]) * SOYJAK_LINE_SIGMA;
+    edges = cv2.GaussianBlur(gray, (0, 0), sigma) - cv2.GaussianBlur(gray, (0, 0), sigma * 1.6);
+    threshold = SOYJAK_EDGE_THRESHOLD;
+    if face_box is not None:
+        # Measured on the middle of the face (eyes, nose, mouth), not the background at its sides.
+        x, y, w, h = (float(v) for v in face_box);
+        x0, x1 = max(0, round(x + w * 0.2)), max(0, round(x + w * 0.8));
+        y0, y1 = max(0, round(y + h * 0.25)), max(0, round(y + h * 0.9));
+        face_edges = edges[y0:y1, x0:x1];
+        if face_edges.size:
+            # Low-contrast faces: lower the bar until this share of the face is ink.
+            threshold = min(threshold, max(0.002, -float(np.percentile(face_edges, SOYJAK_FACE_INK_PERCENT))));
+    ink = (edges < -threshold).astype(np.uint8);
+
+    # Drop specks of noise.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8);
+    keep = stats[:, cv2.CC_STAT_AREA] >= SOYJAK_MIN_INK_AREA;
+    keep[0] = False;  # label 0 is the paper
+    ink = keep[labels].astype(np.float32);
+
+    # Round off the jagged pixel edges so the lines look inked rather than traced.
+    ink = cv2.GaussianBlur(ink, (0, 0), max(1.0, max(img.shape[:2]) * 0.0012));
+    return ink > 0.4;
+
+def _open_mouth(img, mouth, face_width):
+    """Looks for the dark hole of an open mouth around YuNet's mouth point.
+    Returns (centre, half width, half height) of it, or None if the mouth looks closed."""
+    height, width = img.shape[:2];
+    reach = face_width * 0.3;
+    x0, y0 = max(0, round(mouth[0] - reach)), max(0, round(mouth[1] - reach * 0.7));
+    x1, y1 = min(width, round(mouth[0] + reach)), min(height, round(mouth[1] + reach * 1.2));
+    if x1 - x0 < 5 or y1 - y0 < 5:
+        return None;
+
+    gray = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY);
+    gray = cv2.GaussianBlur(gray, (0, 0), max(1.0, face_width * 0.01));
+    # The inside of an open mouth is the darkest thing around it, well below the skin.
+    dark = ((gray <= np.percentile(gray, 12)) & (gray < np.median(gray) * 0.6)).astype(np.uint8);
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(dark, connectivity=8);
+
+    best = None;
+    for i in range(1, count):
+        if stats[i, cv2.CC_STAT_AREA] < (face_width * 0.06) ** 2:
+            continue;
+        centroid = centroids[i] + (x0, y0);
+        distance = float(np.linalg.norm(centroid - mouth));
+        if distance < face_width * 0.15 and (best is None or distance < best[0]):
+            best = (distance, centroid, stats[i, cv2.CC_STAT_WIDTH] / 2, stats[i, cv2.CC_STAT_HEIGHT] / 2);
+
+    return None if best is None else best[1:];
+
+def _shadows(img, face, person):
+    """Finds the darkest parts of the face (an open mouth, pupils, deep shadows), to fill in
+    solid black like the spot blacks in an ink drawing. Returns a bool array the size of img."""
+    height, width = img.shape[:2];
+    face_width = face[3];
+    x, y, w, h = (float(v) for v in face[4]);
+    x0, x1 = max(0, round(x - w * 0.05)), min(width, round(x + w * 1.05));
+    y0, y1 = max(0, round(y)), min(height, round(y + h * 1.1));
+    shadows = np.zeros((height, width), dtype=bool);
+    if x1 - x0 < 5 or y1 - y0 < 5:
+        return shadows;
+
+    gray = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY);
+    gray = cv2.GaussianBlur(gray, (0, 0), max(1.0, face_width * 0.006));
+    inside = person[y0:y1, x0:x1] > 0;
+    if not inside.any():
+        return shadows;
+    skin = gray[inside];
+    dark = (gray <= min(np.percentile(skin, 4), np.median(skin) * 0.45)) & inside;
+
+    # Keep blobs, not thin slivers along edges.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(dark.astype(np.uint8), connectivity=8);
+    keep = stats[:, cv2.CC_STAT_AREA] >= (face_width * 0.04) ** 2;
+    keep[0] = False;
+    shadows[y0:y1, x0:x1] = keep[labels];
+    return shadows;
+
+def _draw_soyjak_features(canvas, img, face, person, rng):
+    """Draws stubble and forehead wrinkles onto canvas (0 ink, 255 paper).
+    img is the photo, used to keep the stubble off the real mouth."""
+    _, _, mouth, face_width, _ = face;
+    eye_middle, right, down, tilt = _face_axes(face);
+    thickness = max(1, round(face_width * 0.012));
+
+    def point(origin, along_right, along_down):
+        p = origin + right * along_right * face_width + down * along_down * face_width;
+        return (round(float(p[0])), round(float(p[1])));
+
+    # Where the mouth is, so the stubble stays off it: the open hole if there is one,
+    # otherwise a lip-sized area around YuNet's mouth point.
+    opening = _open_mouth(img, mouth, face_width);
+    if opening is None:
+        mouth_centre = point(mouth, 0, 0);
+        mouth_axes = (face_width * 0.14, face_width * 0.08);
+    else:
+        centre, half_width, half_height = opening;
+        mouth_centre = (round(float(centre[0])), round(float(centre[1])));
+        mouth_axes = (max(half_width, face_width * 0.1), max(half_height, face_width * 0.06));
+
+    # Stubble: short strokes on the chin, jaw and upper lip, avoiding the mouth.
+    stubble = np.zeros(canvas.shape, dtype=np.uint8);
+    jaw_centre = point(mouth, 0, 0.02);
+    cv2.ellipse(stubble, jaw_centre, (round(face_width * 0.45), round(face_width * 0.42)), tilt, 0, 360, 1, -1);
+    # Not above the nostrils.
+    nose_line = eye_middle + down * face_width * 0.42;
+    cv2.ellipse(stubble, mouth_centre, (round(mouth_axes[0] * 1.35), round(mouth_axes[1] * 1.25)), tilt, 0, 360, 0, -1);
+    ys, xs = np.nonzero(stubble & (person > 0));
+    if len(xs):
+        above_nose = ((np.stack([xs, ys], axis=1) - nose_line) @ down) < 0;
+        xs, ys = xs[~above_nose], ys[~above_nose];
+    if len(xs):
+        # Enough strokes to cover the same share of the jaw on any size of face.
+        stroke = face_width * 0.02;
+        count = min(len(xs), round(len(xs) * SOYJAK_STUBBLE_DENSITY / stroke ** 2));
+        picks = rng.choice(len(xs), size=count, replace=False);
+        hair = max(1, round(face_width * 0.0025));
+        for i in picks:
+            angle = rng.uniform(0, np.pi);
+            length = stroke * rng.uniform(0.4, 1.2);
+            dx, dy = np.cos(angle) * length / 2, np.sin(angle) * length / 2;
+            cv2.line(canvas, (round(xs[i] - dx), round(ys[i] - dy)), (round(xs[i] + dx), round(ys[i] + dy)), 0, hair, cv2.LINE_AA);
+
+    # Forehead wrinkles: a few shallow arcs above the brows.
+    for i in range(3):
+        centre = point(eye_middle, rng.uniform(-0.03, 0.03), -0.22 - i * 0.06);
+        axes = (round(face_width * rng.uniform(0.14, 0.2)), round(face_width * 0.035));
+        cv2.ellipse(canvas, centre, axes, tilt, 200, 340, 0, thickness, cv2.LINE_AA);
+
+def _soyjakify(image_data):
+    """Redraws the image as a black-and-white soyjak. Returns PNG bytes.
+    Without a face it's just line art. Raises ValueError if the image can't be decoded."""
+    img = cv2.imdecode(np.frombuffer(image_data, dtype=np.uint8), cv2.IMREAD_COLOR);
+    if img is None:
+        raise ValueError("Image could not be decoded.");
+    img = _resize_longest_side(img, SOYJAK_SIDE);
+
+    face = _find_face(img);
+    ink = _line_art(img, None if face is None else face[4]);
+
+    if face is not None:
+        person = _person_mask(img, face);
+        ink &= person > 0;
+        # Outline the cut-out, except along the edges of the picture.
+        outline = cv2.morphologyEx(person, cv2.MORPH_GRADIENT, np.ones((5, 5), np.uint8)) > 0;
+        outline[:2, :] = outline[-2:, :] = False;
+        outline[:, :2] = outline[:, -2:] = False;
+        ink |= outline;
+        shadows = _shadows(img, face, person);
+        ink |= shadows;
+
+    canvas = np.where(ink, 0, 255).astype(np.uint8);
+
+    if face is not None:
+        # Same image, same stubble.
+        rng = np.random.default_rng(int.from_bytes(hashlib.sha256(image_data).digest()[:8], "little"));
+        _draw_soyjak_features(canvas, img, face, person & ~shadows, rng);
+
+    ok, png = cv2.imencode(".png", canvas);
+    if not ok:
+        raise ValueError("Soyjak image could not be encoded.");
     return png.tobytes();
 
 def _user_voice_channel(interaction: discord.Interaction):
@@ -213,7 +475,7 @@ async def on_ready():
         await bot.tree.sync();
         print("Global commands synced.");
 
-    # /gawk is a server-only command, so the server's commands always need syncing as well.
+    # /gawk and /soyjak are server-only commands, so the server's commands always need syncing as well.
     synced = await bot.tree.sync(guild=GUILD);
     print(f"Server commands synced: {', '.join(sorted(c.name for c in synced))}");
 
@@ -239,27 +501,25 @@ async def on_voice_state_update(member, before, after):
         _cancel_idle_timer(member.guild.id);
         await voice_client.disconnect();
 
+async def _latest_image_url(channel):
+    """Returns the URL of the newest image attachment or embed in the last 50 messages, or ""."""
+    async for message in channel.history(limit=50):
+        for attachment in message.attachments:
+            if attachment.content_type and "image" in attachment.content_type:
+                return attachment.url;
+
+        for embed in message.embeds:
+            if embed.image:
+                return embed.image.url;
+
+    return "";
+
 @bot.tree.command(name="gawk", description="Give the face in the most recent image big eyes and a gaping mouth.")
 @app_commands.guilds(GUILD)
 async def gawk(interaction: discord.Interaction):
     await interaction.response.defer();
 
-    imageUrl = "";
-    async for message in interaction.channel.history(limit=50):
-        for attachment in message.attachments:
-            if attachment.content_type and "image" in attachment.content_type:
-                imageUrl = attachment.url;
-                break;
-
-        if not imageUrl:
-            for embed in message.embeds:
-                if embed.image:
-                    imageUrl = embed.image.url;
-                    break;
-
-        if imageUrl:
-            break;
-
+    imageUrl = await _latest_image_url(interaction.channel);
     if not imageUrl:
         await interaction.followup.send("No recent images found.");
         return;
@@ -282,6 +542,31 @@ async def gawk(interaction: discord.Interaction):
         return;
 
     await interaction.followup.send(file=discord.File(io.BytesIO(png), filename="gawk.png"));
+
+@bot.tree.command(name="soyjak", description="Redraw the most recent image as a soyjak.")
+@app_commands.guilds(GUILD)
+async def soyjak(interaction: discord.Interaction):
+    await interaction.response.defer();
+
+    imageUrl = await _latest_image_url(interaction.channel);
+    if not imageUrl:
+        await interaction.followup.send("No recent images found.");
+        return;
+
+    try:
+        response = await asyncio.to_thread(requests.get, imageUrl, timeout=15);
+        response.raise_for_status();
+        # Image processing is CPU-heavy, so keep it off the event loop.
+        png = await asyncio.to_thread(_soyjakify, response.content);
+    except (requests.RequestException, ValueError):
+        await interaction.followup.send("Failed to load image.");
+        return;
+    except Exception as e:
+        print(f"/soyjak failed: {e!r}");
+        await interaction.followup.send("Something went wrong drawing that image.");
+        return;
+
+    await interaction.followup.send(file=discord.File(io.BytesIO(png), filename="soyjak.png"));
 
 @bot.tree.command(name="play", description="Play a song in your voice channel.")
 @app_commands.describe(song_query="Search query")
@@ -371,4 +656,5 @@ async def stop(interaction: discord.Interaction):
     await interaction.followup.send("Music stopped.");
 
 
-bot.run(TOKEN);
+if __name__ == "__main__":
+    bot.run(TOKEN);
