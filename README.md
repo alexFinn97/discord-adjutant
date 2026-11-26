@@ -161,6 +161,7 @@ Only run one copy of the bot per token. Stop the local one before the VM's start
 
 - The first time `/gawk` runs, the bot downloads OpenCV's YuNet face detection model (about 230 KB) from the [opencv_zoo](https://github.com/opencv/opencv_zoo) repository into `DiscordBot\models`, and checks it against a SHA-256 checksum. That folder is ignored by git.
 - `/play` replaces whatever is playing; there's no queue yet.
+- The bot leaves voice by itself after 3 minutes with nothing playing, or straight away once nobody else is in its channel. Change `IDLE_DISCONNECT_SECONDS` in `MyBot.py` to adjust the wait.
 
 ## License
 

@@ -177,6 +177,28 @@ def _user_voice_channel(interaction: discord.Interaction):
     voice_state = getattr(interaction.user, "voice", None);
     return voice_state.channel if voice_state else None;
 
+# The bot leaves voice after this long with nothing playing. It also leaves straight away
+# once nobody else is in its channel (see on_voice_state_update).
+IDLE_DISCONNECT_SECONDS = 180;
+_idle_timers = {};  # guild ID -> task that disconnects when the time is up
+
+def _cancel_idle_timer(guild_id):
+    task = _idle_timers.pop(guild_id, None);
+    if task:
+        task.cancel();
+
+def _start_idle_timer(guild):
+    _cancel_idle_timer(guild.id);
+    _idle_timers[guild.id] = asyncio.create_task(_leave_when_idle(guild));
+
+async def _leave_when_idle(guild):
+    await asyncio.sleep(IDLE_DISCONNECT_SECONDS);
+    _idle_timers.pop(guild.id, None);
+    voice_client = guild.voice_client;
+    # A newer /play may have started since this timer did; only leave if it's really quiet.
+    if voice_client and not (voice_client.is_playing() or voice_client.is_paused()):
+        await voice_client.disconnect();
+
 intents = discord.Intents.default();
 intents.message_content = True;
 
@@ -196,6 +218,26 @@ async def on_ready():
     print(f"Server commands synced: {', '.join(sorted(c.name for c in synced))}");
 
     print(f"{bot.user} is online!");
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    voice_client = member.guild.voice_client;
+    if voice_client is None or not voice_client.is_connected():
+        return;
+
+    if member.id == bot.user.id:
+        if after.channel is None:
+            # Someone disconnected the bot by hand.
+            _cancel_idle_timer(member.guild.id);
+        return;
+
+    # Only check when someone leaves the bot's channel.
+    if before.channel != voice_client.channel or after.channel == voice_client.channel:
+        return;
+
+    if not any(not m.bot for m in voice_client.channel.members):
+        _cancel_idle_timer(member.guild.id);
+        await voice_client.disconnect();
 
 @bot.tree.command(name="gawk", description="Give the face in the most recent image big eyes and a gaping mouth.")
 @app_commands.guilds(GUILD)
@@ -298,7 +340,17 @@ async def play(interaction: discord.Interaction, song_query: str):
     if voice_client.is_playing() or voice_client.is_paused():
         voice_client.stop();
 
-    voice_client.play(source);
+    loop = asyncio.get_running_loop();
+    guild = interaction.guild;
+
+    def finished(error):
+        if error:
+            print(f"/play stopped with an error: {error!r}");
+        # This runs on discord.py's audio thread, so start the idle timer on the event loop.
+        loop.call_soon_threadsafe(_start_idle_timer, guild);
+
+    _cancel_idle_timer(guild.id);
+    voice_client.play(source, after=finished);
 
     await interaction.followup.send(f"Now Playing: {title}");
 
@@ -314,6 +366,7 @@ async def stop(interaction: discord.Interaction):
 
     voice_client.stop();
     await voice_client.disconnect();
+    _cancel_idle_timer(interaction.guild.id);
 
     await interaction.followup.send("Music stopped.");
 
