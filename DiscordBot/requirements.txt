@@ -1,4 +1,7 @@
 discord.py[voice]==2.7.1
+# Voice encryption (DAVE) for discord.py. 0.2.0 needs calls discord.py 2.7.1 doesn't make,
+# so the bot "speaks" but nobody can hear it. Keep this pinned until discord.py supports 0.2.
+davey==0.1.5
 python-dotenv==1.2.2
 # yt-dlp needs regular updates to keep working with YouTube
 yt-dlp>=2026.11.23
