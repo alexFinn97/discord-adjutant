@@ -1,6 +1,7 @@
 import hashlib
 import io
 import os
+import time
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -279,6 +280,12 @@ async def play(interaction: discord.Interaction, song_query: str):
     first_track = tracks[0];
     audio_url = first_track.get("url") or first_track.get("webpage_url");
     title = first_track.get("title", "Untitled");
+
+    # YouTube's stream links only start working a few seconds after they're issued, and refuse
+    # (403) any earlier request, so wait until the time yt-dlp reports. Live streams have none.
+    available_at = first_track.get("available_at");
+    if available_at:
+        await asyncio.sleep(max(0, available_at - time.time()));
 
     source = discord.FFmpegPCMAudio(
         audio_url,
