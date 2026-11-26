@@ -172,12 +172,48 @@ In **Settings → Secrets and variables → Actions**:
   - Check its resource use: `docker stats`
 - **Restarts:** the container restarts by itself after a crash or a reboot (`restart: unless-stopped`), as long as Docker starts on boot, which it does by default.
 
-## 8. Moving to the Raspberry Pi later
+## 8. Keeping the host patched (You)
+
+[`deploy/host/setup-auto-updates.sh`](../deploy/host/setup-auto-updates.sh) sets up Debian's `unattended-upgrades` (see Debian's [AutomatedUpgrade](https://wiki.debian.org/AutomatedUpgrade) page) to patch the box once a week while everyone's asleep. Run it once, with an account on the box that has `sudo` (not `deploy`).
+
+**Set it up.** From the repo on your PC, copy the script over Tailscale, then run it:
+
+```powershell
+scp deploy/host/setup-auto-updates.sh <your-user>@100.x.y.z:
+ssh <your-user>@100.x.y.z
+```
+
+```bash
+sudo bash setup-auto-updates.sh
+```
+
+**Catch up now.** The box may never have been patched, so don't wait for Sunday:
+
+```bash
+sudo unattended-upgrade -v
+[ -f /var/run/reboot-required ] && sudo reboot
+```
+
+**What happens each week** (in the box's own timezone, shown by `timedatectl`):
+
+| When | What |
+|---|---|
+| Sunday 03:30 | Refresh the package lists |
+| Sunday 04:00 | Install updates from Debian (security and stable updates), Docker and Tailscale |
+| Sunday 04:30 | Reboot, only if an update needs it |
+
+- If the box is off on Sunday night, the run happens the next time it boots.
+- A Docker update or a reboot restarts the bot. It comes back by itself, usually within a minute.
+- **Check the schedule:** `systemctl list-timers 'apt-daily*'`
+- **See what was installed:** `/var/log/unattended-upgrades/unattended-upgrades.log`
+- **Undo it:** the script prints the commands at the end.
+
+## 9. Moving to the Raspberry Pi later
 
 The bot keeps almost no state: just `.env`, and a face model it downloads again by itself. So moving it is mostly a repeat of the steps above.
 
 1. **Set up the Pi.** Flash **64-bit Raspberry Pi OS Lite** and enable SSH in Raspberry Pi Imager.
-2. **Repeat the earlier steps on the Pi.** Do step 2's install commands, step 3 (`tailscale up --advertise-tags=tag:bothost`, then approve it), and step 4 (the `deploy` user, the same public key, and `.env`).
+2. **Repeat the earlier steps on the Pi.** Do step 2's install commands, step 3 (`tailscale up --advertise-tags=tag:bothost`, then approve it), step 4 (the `deploy` user, the same public key, and `.env`), and step 8 (weekly patching; it works on Raspberry Pi OS too, though it only adds Debian's, Docker's and Tailscale's update sources, not the Pi's own).
 3. **Stop the bot on the friend's server:** `docker compose down`.
 4. **Point GitHub at the Pi.** Change the `DEPLOY_HOST` secret to the Pi's Tailscale IP.
 5. **Deploy.** Run **Build and deploy**, then check `docker compose ps`, the logs, `/gawk` and `/play`.
